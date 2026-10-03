@@ -6,10 +6,10 @@ export default async function Consign({ searchParams }: { searchParams: Promise<
     <>
       <h1>Sell your watch at auction</h1>
       <p className="muted" style={{ maxWidth: 680 }}>
-        Tell us about your watch and a specialist will call you, usually within one business day. If it&apos;s a fit, we&apos;ll
-        authenticate it, photograph it in our studio and agree a starting price and reserve with you. You&apos;re paid by bank transfer
-        once the buyer has paid and collected. Seller&apos;s commission is 5% of the hammer price. There are no listing fees.
-        We never publish your name or location.
+        Tell us about your watch and a specialist will call you, usually within one business day. If it&apos;s a fit, the watch comes
+        into our custody: we keep it secure, authenticate it, photograph it in our studio and agree a starting price and
+        reserve with you. The buyer pays Nilaam, collects the watch from us, and we then pay you by bank transfer. Seller&apos;s commission
+        is 5% of the final price. There are no listing fees. We never publish your name or location.
       </p>
       {sent ? (
         <div className="notice good">Thank you. A specialist will be in touch shortly.</div>

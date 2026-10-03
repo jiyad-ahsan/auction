@@ -24,7 +24,7 @@ export function BidPanel({ initial }: { initial: LotState }) {
   useEffect(() => {
     if (state.phase === "closed") return;
     const msLeft = new Date(state.ends_at).getTime() - (Date.now() + offset.current);
-    const interval = msLeft < 5 * 60_000 ? 1500 : 4000;
+    const interval = msLeft < Math.max(5, state.extension_minutes + 1) * 60_000 ? 1500 : 4000;
     const t = setTimeout(async () => {
       try {
         const res = await fetch(`/api/lots/${state.id}`, { cache: "no-store" });
@@ -100,7 +100,7 @@ export function BidPanel({ initial }: { initial: LotState }) {
           Ends in <strong><Countdown endsAt={state.ends_at} serverOffsetMs={offset.current} /></strong>
           <br />
           <span className="muted small">
-            {fmtPktDateTime(state.ends_at)}. Bids in the last 2 minutes extend the auction by 2 minutes.
+            {fmtPktDateTime(state.ends_at)}. A bid in the last {state.extension_minutes} minutes extends the auction by {state.extension_minutes} minutes.
           </span>
         </p>
       )}

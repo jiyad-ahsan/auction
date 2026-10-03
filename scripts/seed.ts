@@ -23,18 +23,22 @@ async function main() {
      on conflict (phone) do update set role = 'admin'`,
     [admin],
   );
+  const invite = (await c.query(
+    "insert into invites (code, label, default_bid_limit) values ('LHR-VINTAGE', 'WhatsApp: Vintage Watches Lahore (sample)', 5000000) on conflict (code) do update set label = excluded.label returning id",
+  )).rows[0].id;
   const bidders: string[] = [];
   for (const [i, handle] of ["gmt_master_lhr", "clifton_collector", "isb_horology"].entries()) {
     const r = await c.query(
-      `insert into users (phone, handle, full_name, kyc_status, cnic_last4) values ($1, $2, $3, 'approved', '1234')
+      `insert into users (phone, handle, full_name, kyc_status, cnic_last4, email, email_verified_at, invite_id, assigned_limit)
+       values ($1, $2, $3, 'approved', '1234', $4, now(), $5, 15000000)
        on conflict (phone) do update set handle = excluded.handle returning id`,
-      [`+92321000000${i}`, handle, `Sample Bidder ${i + 1}`],
+      [`+92321000000${i}`, handle, `Sample Bidder ${i + 1}`, `${handle}@example.com`, invite],
     );
     bidders.push(r.rows[0].id);
-    await c.query("insert into deposits (user_id, amount, method, reference, status, confirmed_at) values ($1, 500000, 'raast', $2, 'confirmed', now())", [r.rows[0].id, `SAMPLE-${i}`]);
     await c.query("select recalc_bid_limit($1)", [r.rows[0].id]);
   }
-  const consignor = (await c.query("insert into consignors (name, phone, notes) values ('Sample Consignor', '+923339999999', 'Seed data') returning id")).rows[0].id;
+  const consignor = (await c.query("insert into consignors (name, phone, notes, no_shill_agreed_at) values ('Sample Consignor', '+923339999999', 'Seed data', now()) returning id")).rows[0].id;
+  const tagIds = Object.fromEntries((await c.query("select slug, id from tags")).rows.map((r) => [r.slug, r.id]));
 
   for (const w of WATCHES) {
     const watch = (await c.query(
@@ -44,6 +48,10 @@ async function main() {
        "Serviced 2024 by an independent watchmaker (sample)",
        `Sample listing. A ${w.year} ${w.brand} ${w.model} in ${w.grade === "A" ? "excellent" : "very good"} condition, consigned by a private collector in Lahore.\n\nPhotographed in our studio; the full authentication report is below.`],
     )).rows[0].id;
+    await c.query("update watches set custody_status = 'in_custody', custody_location = 'Lahore vault (sample)', custody_received_at = now() where id = $1", [watch]);
+    await c.query("insert into custody_events (watch_id, event, location, note) values ($1, 'received', 'Lahore vault (sample)', 'Seed data')", [watch]);
+    const slugs = [w.box && w.papers ? "box-and-papers" : !w.box && !w.papers ? "watch-only" : null, w.grade === "B" ? "patina" : "unpolished", "service-history"].filter(Boolean) as string[];
+    for (const slug of slugs) await c.query("insert into watch_tags (watch_id, tag_id) values ($1, $2) on conflict do nothing", [watch, tagIds[slug]]);
     await c.query(
       `insert into authentication_reports (watch_id, specialist, inspected_at, verdict, condition_grade, case_notes, dial_notes, bracelet_notes, movement_notes, rate_s_per_day, amplitude_deg, beat_error_ms, water_tested, aftermarket_parts, checks)
        values ($1, 'Lead Watch Specialist', current_date - 7, 'authentic', $2, 'Light desk-diving marks on clasp side; lugs unpolished', 'Original, no lume degradation', 'Minimal stretch', 'Clean; matches calibre', 2.5, 285, 0.2, true, null, $3)`,

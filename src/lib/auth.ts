@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { randomInt } from "node:crypto";
-import { query, queryOne } from "./db";
+import { query, queryOne, tx } from "./db";
+import { settings } from "./settings";
 import { randomToken, sha256 } from "./crypto";
 import { notifier } from "./notify";
 
@@ -16,6 +17,9 @@ export type User = {
   cnic_last4: string | null;
   kyc_notes: string | null;
   bid_limit: number;
+  assigned_limit: number;
+  email_verified_at: Date | null;
+  invite_id: string | null;
   suspended: boolean;
 };
 
@@ -27,6 +31,27 @@ const OTP_MAX_ATTEMPTS = 5;
 
 function otpHash(phone: string, code: string): string {
   return sha256(`${process.env.SESSION_SECRET ?? ""}:${phone}:${code}`);
+}
+
+function isAdminPhone(phone: string): boolean {
+  return (process.env.ADMIN_PHONES ?? "").split(",").map((p) => p.trim()).filter(Boolean).includes(phone);
+}
+
+export type InviteCheck = { ok: true; inviteId: string | null } | { ok: false; error: "invite_required" | "invite_invalid" };
+
+// New members need a valid invite while the platform is invite-only. Existing
+// members and admins sign in without one.
+export async function checkInvite(phone: string, code: string | null): Promise<InviteCheck> {
+  const existing = await queryOne("select 1 from users where phone = $1", [phone]);
+  if (existing || isAdminPhone(phone)) return { ok: true, inviteId: null };
+  const { invite_only } = await settings();
+  if (!code) return invite_only ? { ok: false, error: "invite_required" } : { ok: true, inviteId: null };
+  const invite = await queryOne<{ id: string }>(
+    "select id from invites where code = $1 and active and (max_uses is null or uses < max_uses)",
+    [code.trim().toUpperCase()],
+  );
+  if (!invite) return invite_only ? { ok: false, error: "invite_invalid" } : { ok: true, inviteId: null };
+  return { ok: true, inviteId: invite.id };
 }
 
 export async function requestOtp(phone: string): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -46,7 +71,7 @@ export async function requestOtp(phone: string): Promise<{ ok: true } | { ok: fa
   return { ok: true };
 }
 
-export async function verifyOtp(phone: string, code: string): Promise<User | null> {
+export async function verifyOtp(phone: string, code: string, inviteCode: string | null = null): Promise<User | null | "invite_invalid"> {
   const otp = await queryOne<{ id: number; code_hash: string; attempts: number }>(
     `select id, code_hash, attempts from otp_codes
       where phone = $1 and consumed_at is null and expires_at > now()
@@ -60,15 +85,43 @@ export async function verifyOtp(phone: string, code: string): Promise<User | nul
   }
   await query("update otp_codes set consumed_at = now() where id = $1", [otp.id]);
 
-  const adminPhones = (process.env.ADMIN_PHONES ?? "").split(",").map((p) => p.trim()).filter(Boolean);
-  const role = adminPhones.includes(phone) ? "admin" : "bidder";
-  const user = await queryOne<User>(
-    `insert into users (phone, role) values ($1, $2)
-     on conflict (phone) do update set role = case when excluded.role = 'admin' then 'admin' else users.role end
-     returning *`,
-    [phone, role],
-  );
-  return user;
+  const role = isAdminPhone(phone) ? "admin" : "bidder";
+  const existing = await queryOne<User>("select * from users where phone = $1", [phone]);
+  if (existing) {
+    if (role === "admin" && existing.role !== "admin") {
+      return queryOne<User>("update users set role = 'admin' where id = $1 returning *", [existing.id]);
+    }
+    return existing;
+  }
+
+  // New member: claim an invite use atomically, and start with that invite's bid limit.
+  return tx(async (c) => {
+    let inviteId: string | null = null;
+    let assigned = 0;
+    if (inviteCode) {
+      const inv = (
+        await c.query(
+          `update invites set uses = uses + 1
+            where code = $1 and active and (max_uses is null or uses < max_uses)
+            returning id, default_bid_limit`,
+          [inviteCode.trim().toUpperCase()],
+        )
+      ).rows[0];
+      if (inv) {
+        inviteId = inv.id;
+        assigned = Number(inv.default_bid_limit);
+      }
+    }
+    const { invite_only } = (await c.query("select invite_only from app_settings")).rows[0] ?? { invite_only: true };
+    if (!inviteId && invite_only && role !== "admin") return "invite_invalid" as const;
+    const user = (
+      await c.query(
+        "insert into users (phone, role, invite_id, assigned_limit, bid_limit) values ($1, $2, $3, $4, $4) returning *",
+        [phone, role, inviteId, assigned],
+      )
+    ).rows[0] as User;
+    return user;
+  });
 }
 
 export async function startSession(userId: string): Promise<void> {

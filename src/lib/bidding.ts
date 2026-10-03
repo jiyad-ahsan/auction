@@ -21,6 +21,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   BIDDER_NOT_FOUND: "Please sign in again.",
   BIDDER_SUSPENDED: "Your account is suspended. Contact us for help.",
   KYC_REQUIRED: "Your identity must be verified before you can bid.",
+  EMAIL_UNVERIFIED: "Verify your email address before you can bid.",
   SELLER_CANNOT_BID: "Consignors can't bid on their own lots.",
   BID_LIMIT_EXCEEDED: "This bid is above your available bid limit. Add a deposit to raise it.",
   BID_TOO_LOW: "Your bid is below the minimum next bid.",

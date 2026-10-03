@@ -15,6 +15,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         <Link href="/admin/kyc">Bidders &amp; KYC</Link>
         <Link href="/admin/deposits">Deposits</Link>
         <Link href="/admin/invoices">Invoices &amp; payouts</Link>
+        <Link href="/admin/invites">Invites</Link>
+        <Link href="/admin/tags">Tags</Link>
+        <Link href="/admin/settings">Settings</Link>
       </nav>
       {children}
     </>

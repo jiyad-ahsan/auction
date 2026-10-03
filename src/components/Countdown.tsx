@@ -23,5 +23,5 @@ export function Countdown({ endsAt, serverOffsetMs = 0 }: { endsAt: string; serv
   }, []);
   if (now === null) return <span>&nbsp;</span>;
   const ms = new Date(endsAt).getTime() - (now + serverOffsetMs);
-  return <span style={{ color: ms < 120_000 && ms > 0 ? "var(--bad)" : undefined }}>{formatRemaining(ms)}</span>;
+  return <span style={{ color: ms < 300_000 && ms > 0 ? "var(--bad)" : undefined }}>{formatRemaining(ms)}</span>;
 }

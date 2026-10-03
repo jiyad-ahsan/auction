@@ -18,6 +18,9 @@ export type PublicLot = {
   leader_handle: string | null;
   buyer_premium_bps: number;
   buyer_premium_min: number;
+  extension_seconds: number;
+  sold_via: "auction" | "post_auction" | null;
+  tags: Tag[];
   watch_id: string;
   brand: string;
   model: string;
@@ -42,7 +45,10 @@ const PUBLIC_LOT_SELECT = `
          l.reserve_price is not null as has_reserve,
          (l.reserve_price is null or coalesce(l.current_price, 0) >= l.reserve_price) as reserve_met,
          l.starts_at, l.ends_at, l.bid_count, l.leader_id, u.handle as leader_handle,
-         l.buyer_premium_bps, l.buyer_premium_min,
+         l.buyer_premium_bps, l.buyer_premium_min, l.extension_seconds, l.sold_via,
+         coalesce((select json_agg(json_build_object('slug', t.slug, 'label', t.label) order by t.label)
+                     from watch_tags wt join tags t on t.id = wt.tag_id
+                    where wt.watch_id = w.id and t.active), '[]') as tags,
          w.id as watch_id, w.brand, w.model, w.reference, w.year, w.case_material, w.case_diameter_mm,
          w.movement, w.calibre, w.dial, w.bracelet, w.has_box, w.has_papers, w.papers_date,
          w.service_history, w.description,
@@ -51,8 +57,23 @@ const PUBLIC_LOT_SELECT = `
     join watches w on w.id = l.watch_id
     left join users u on u.id = l.leader_id`;
 
-export async function liveAndUpcomingLots(): Promise<PublicLot[]> {
-  return query<PublicLot>(`${PUBLIC_LOT_SELECT} where l.status = 'published' order by l.ends_at`);
+export type Tag = { slug: string; label: string };
+
+const TAG_FILTER = `($1::text is null or exists (
+  select 1 from watch_tags wt join tags t on t.id = wt.tag_id where wt.watch_id = w.id and t.slug = $1 and t.active))`;
+
+export async function liveAndUpcomingLots(tag: string | null = null): Promise<PublicLot[]> {
+  return query<PublicLot>(`${PUBLIC_LOT_SELECT} where l.status = 'published' and ${TAG_FILTER} order by l.ends_at`, [tag]);
+}
+
+// Tags that appear on at least one live or upcoming lot, for the catalogue filter.
+export async function tagsInUse(): Promise<(Tag & { n: number })[]> {
+  return query(
+    `select t.slug, t.label, count(*)::int as n
+       from tags t join watch_tags wt on wt.tag_id = t.id join lots l on l.watch_id = wt.watch_id
+      where t.active and l.status = 'published'
+      group by t.slug, t.label order by t.label`,
+  );
 }
 
 export async function recentResults(limit = 50): Promise<PublicLot[]> {

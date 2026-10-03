@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { DatabaseError } from "pg";
 import { audit } from "@/lib/audit";
 import { requireStaff } from "@/lib/auth";
 import { closeDueLots } from "@/lib/closing";
@@ -231,22 +232,64 @@ export async function createLotAction(formData: FormData) {
     redirect(`/admin/watches/${watchId}?error=lot`);
   }
   const publish = formData.get("publish") === "on";
-  const [lot] = await query<{ id: string }>(
-    `insert into lots (watch_id, status, starting_price, reserve_price, starts_at, ends_at, scheduled_ends_at)
-     values ($1, $2, $3, $4, $5, $6, $6) returning id`,
-    [watchId, publish ? "published" : "draft", starting, reserve, startsAt, endsAt],
-  );
+  const extensionMinutes = Math.min(30, Math.max(1, Number(str(formData, "extension_minutes")) || 5));
+  let lot: { id: string };
+  try {
+    [lot] = await query<{ id: string }>(
+      `insert into lots (watch_id, status, starting_price, reserve_price, starts_at, ends_at, scheduled_ends_at, extension_seconds)
+       values ($1, $2, $3, $4, $5, $6, $6, $7) returning id`,
+      [watchId, publish ? "published" : "draft", starting, reserve, startsAt, endsAt, extensionMinutes * 60],
+    );
+  } catch (e) {
+    const code = publishError(e);
+    if (code) redirect(`/admin/watches/${watchId}?error=${code}`);
+    throw e;
+  }
   await query("update watches set status = 'listed' where id = $1", [watchId]);
-  await audit(staff.id, "lot.created", "lot", lot.id, { starting, reserve, publish });
+  await audit(staff.id, "lot.created", "lot", lot.id, { starting, reserve, publish, extensionMinutes });
   redirect("/admin/lots");
 }
 
 export async function publishLotAction(formData: FormData) {
   const staff = await requireStaff();
   const id = str(formData, "lot_id");
-  await query("update lots set status = 'published' where id = $1 and status = 'draft' and ends_at > now()", [id]);
+  try {
+    await query("update lots set status = 'published' where id = $1 and status = 'draft' and ends_at > now()", [id]);
+  } catch (e) {
+    const code = publishError(e);
+    if (code) redirect(`/admin/lots?error=${code}`);
+    throw e;
+  }
   await audit(staff.id, "lot.published", "lot", id);
   revalidatePath("/admin/lots");
+}
+
+// The database refuses to publish a lot unless the watch is in our custody and
+// the consignor has signed the no-shill agreement.
+function publishError(e: unknown): string | null {
+  if (e instanceof DatabaseError && (e.message === "WATCH_NOT_IN_CUSTODY" || e.message === "NO_SHILL_AGREEMENT_MISSING")) {
+    return e.message === "WATCH_NOT_IN_CUSTODY" ? "not_in_custody" : "no_shill";
+  }
+  return null;
+}
+
+// A deal agreed after a lot missed its reserve still runs through Nilaam.
+export async function postAuctionSaleAction(formData: FormData) {
+  const staff = await requireStaff();
+  const lotId = str(formData, "lot_id");
+  const buyerId = str(formData, "buyer_id");
+  const price = optNum(formData, "price");
+  if (!buyerId || !price || price <= 0) redirect("/admin/lots?error=post_sale");
+  try {
+    await query("select record_post_auction_sale($1, $2, $3, $4)", [lotId, buyerId, price, staff.id]);
+  } catch (e) {
+    if (e instanceof DatabaseError && ["LOT_NOT_UNSOLD", "BUYER_DID_NOT_BID", "INVALID_AMOUNT"].includes(e.message)) {
+      redirect(`/admin/lots?error=post_sale`);
+    }
+    throw e;
+  }
+  await notifyUser(buyerId, `Your offer of PKR ${price.toLocaleString("en-US")} has been accepted. Payment details are in your account.`);
+  redirect("/admin/invoices");
 }
 
 // Outage policy: extend a live lot. Never shortens.
@@ -283,13 +326,27 @@ export async function invoiceAction(formData: FormData) {
     const inv = await queryOne<{ buyer_id: string }>("select buyer_id from invoices where id = $1", [id]);
     if (inv) await notifyUser(inv.buyer_id, "Payment received, thank you. We'll contact you to arrange collection from our viewing room.");
   } else if (op === "handed_over") {
-    await query("update invoices set handed_over_at = now() where id = $1 and status = 'paid' and handed_over_at is null", [id]);
+    // Collection needs a verified CNIC, and releases the watch from our custody.
+    const inv = await queryOne<{ kyc_status: string; watch_id: string }>(
+      `select u.kyc_status, l.watch_id from invoices i join users u on u.id = i.buyer_id join lots l on l.id = i.lot_id
+        where i.id = $1 and i.status = 'paid' and i.handed_over_at is null`,
+      [id],
+    );
+    if (!inv) redirect("/admin/invoices");
+    if (inv.kyc_status !== "approved") redirect("/admin/invoices?error=cnic");
+    await tx(async (c) => {
+      await c.query("update invoices set handed_over_at = now() where id = $1", [id]);
+      await c.query("update watches set custody_status = 'released_to_buyer', custody_released_at = now() where id = $1", [inv.watch_id]);
+      await c.query("insert into custody_events (watch_id, event, actor_id, note) values ($1, 'released_to_buyer', $2, 'Collected by buyer')", [inv.watch_id, staff.id]);
+    });
   } else if (op === "defaulted") {
     await tx(async (c) => {
       const inv = (await c.query("update invoices set status = 'defaulted' where id = $1 and status = 'unpaid' returning lot_id, buyer_id", [id])).rows[0];
       if (!inv) return;
       await c.query("update settlements set status = 'void' where lot_id = $1", [inv.lot_id]);
       await c.query("update users set suspended = true where id = $1", [inv.buyer_id]);
+      // The watch stays in our custody and can be relisted.
+      await c.query("update watches set status = 'approved' from lots where lots.id = $1 and watches.id = lots.watch_id", [inv.lot_id]);
     });
   } else {
     throw new Error("bad op");
@@ -314,4 +371,148 @@ export async function settlementPaidAction(formData: FormData) {
   if (updated.length === 0) redirect("/admin/invoices?error=settlement");
   await audit(staff.id, "settlement.paid", "settlement", id, { reference });
   revalidatePath("/admin/invoices");
+}
+
+// ---------------------------------------------------------------- Custody
+
+export async function custodyAction(formData: FormData) {
+  const staff = await requireStaff();
+  const watchId = str(formData, "watch_id");
+  const op = str(formData, "op");
+  const location = optStr(formData, "location");
+  const note = optStr(formData, "note");
+  const back = `/admin/watches/${watchId}`;
+  const w = await queryOne<{ custody_status: string; status: string }>("select custody_status, status from watches where id = $1", [watchId]);
+  if (!w) redirect("/admin/watches");
+
+  if (op === "received") {
+    if (!location) redirect(`${back}?error=location`);
+    if (w.custody_status !== "with_consignor") redirect(back);
+    await tx(async (c) => {
+      await c.query("update watches set custody_status = 'in_custody', custody_location = $2, custody_received_at = now() where id = $1", [watchId, location]);
+      await c.query("insert into custody_events (watch_id, event, location, note, actor_id) values ($1, 'received', $2, $3, $4)", [watchId, location, note, staff.id]);
+    });
+  } else if (op === "moved") {
+    if (!location || w.custody_status !== "in_custody") redirect(`${back}?error=location`);
+    await tx(async (c) => {
+      await c.query("update watches set custody_location = $2 where id = $1", [watchId, location]);
+      await c.query("insert into custody_events (watch_id, event, location, note, actor_id) values ($1, 'moved', $2, $3, $4)", [watchId, location, note, staff.id]);
+    });
+  } else if (op === "returned") {
+    const open = await queryOne("select 1 from lots where watch_id = $1 and status <> 'closed'", [watchId]);
+    if (open || w.status === "sold" || w.custody_status !== "in_custody") redirect(`${back}?error=return`);
+    await tx(async (c) => {
+      await c.query("update watches set custody_status = 'returned_to_consignor', custody_released_at = now(), status = 'returned' where id = $1", [watchId]);
+      await c.query("insert into custody_events (watch_id, event, note, actor_id) values ($1, 'returned_to_consignor', $2, $3)", [watchId, note, staff.id]);
+    });
+  } else {
+    throw new Error("bad op");
+  }
+  await audit(staff.id, `custody.${op}`, "watch", watchId, { location, note });
+  revalidatePath(back);
+}
+
+export async function noShillAgreementAction(formData: FormData) {
+  const staff = await requireStaff();
+  const consignorId = str(formData, "consignor_id");
+  const watchId = str(formData, "watch_id");
+  await query("update consignors set no_shill_agreed_at = now() where id = $1 and no_shill_agreed_at is null", [consignorId]);
+  await audit(staff.id, "consignor.no_shill_agreed", "consignor", consignorId);
+  revalidatePath(`/admin/watches/${watchId}`);
+}
+
+// ---------------------------------------------------------------- Tags
+
+export async function setWatchTagsAction(formData: FormData) {
+  const staff = await requireStaff();
+  const watchId = str(formData, "watch_id");
+  const tagIds = formData.getAll("tag_id").map(String);
+  await tx(async (c) => {
+    await c.query("delete from watch_tags where watch_id = $1", [watchId]);
+    if (tagIds.length) {
+      await c.query("insert into watch_tags (watch_id, tag_id) select $1, unnest($2::uuid[]) on conflict do nothing", [watchId, tagIds]);
+    }
+  });
+  await audit(staff.id, "watch.tags", "watch", watchId, { tagIds });
+  revalidatePath(`/admin/watches/${watchId}`);
+}
+
+const slugify = (s: string) => s.toLowerCase().trim().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+
+export async function createTagAction(formData: FormData) {
+  const staff = await requireStaff();
+  const label = str(formData, "label");
+  const slug = slugify(str(formData, "slug") || label);
+  if (label.length < 2 || slug.length < 2) redirect("/admin/tags?error=tag");
+  const exists = await queryOne("select 1 from tags where slug = $1", [slug]);
+  if (exists) redirect("/admin/tags?error=tag_exists");
+  await query("insert into tags (slug, label, description) values ($1, $2, $3)", [slug, label, optStr(formData, "description")]);
+  await audit(staff.id, "tag.created", "tag", slug, { label });
+  revalidatePath("/admin/tags");
+}
+
+export async function updateTagAction(formData: FormData) {
+  const staff = await requireStaff();
+  const id = str(formData, "tag_id");
+  const label = str(formData, "label");
+  if (label.length < 2) redirect("/admin/tags?error=tag");
+  await query("update tags set label = $2, description = $3, active = $4 where id = $1", [id, label, optStr(formData, "description"), formData.get("active") === "on"]);
+  await audit(staff.id, "tag.updated", "tag", id, { label });
+  revalidatePath("/admin/tags");
+}
+
+// ---------------------------------------------------------------- Invites, limits and settings
+
+export async function createInviteAction(formData: FormData) {
+  const staff = await requireStaff();
+  const label = str(formData, "label");
+  const code = (str(formData, "code") || label).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+  const limit = optNum(formData, "default_bid_limit") ?? 0;
+  const maxUses = optNum(formData, "max_uses");
+  if (label.length < 2 || code.length < 4 || limit < 0) redirect("/admin/invites?error=invite");
+  const exists = await queryOne("select 1 from invites where code = $1", [code]);
+  if (exists) redirect("/admin/invites?error=invite_exists");
+  await query(
+    "insert into invites (code, label, default_bid_limit, max_uses, created_by) values ($1, $2, $3, $4, $5)",
+    [code, label, limit, maxUses && maxUses > 0 ? maxUses : null, staff.id],
+  );
+  await audit(staff.id, "invite.created", "invite", code, { label, limit, maxUses });
+  revalidatePath("/admin/invites");
+}
+
+export async function toggleInviteAction(formData: FormData) {
+  const staff = await requireStaff();
+  const id = str(formData, "invite_id");
+  await query("update invites set active = not active where id = $1", [id]);
+  await audit(staff.id, "invite.toggled", "invite", id);
+  revalidatePath("/admin/invites");
+}
+
+export async function setAssignedLimitAction(formData: FormData) {
+  const staff = await requireStaff();
+  const userId = str(formData, "user_id");
+  const amount = optNum(formData, "assigned_limit");
+  if (amount === null || amount < 0) redirect("/admin/kyc?error=limit");
+  await tx(async (c) => {
+    await c.query("select 1 from users where id = $1 for update", [userId]);
+    await c.query("update users set assigned_limit = $2 where id = $1", [userId, amount]);
+    await c.query("select recalc_bid_limit($1)", [userId]);
+  });
+  await audit(staff.id, "user.assigned_limit", "user", userId, { amount });
+  revalidatePath("/admin/kyc");
+}
+
+export async function updateSettingsAction(formData: FormData) {
+  const staff = await requireStaff();
+  if (staff.role !== "admin") redirect("/admin");
+  const baseline = optNum(formData, "baseline_sell_through_pct");
+  const pilot = formData.get("pilot_mode") === "on";
+  const inviteOnly = formData.get("invite_only") === "on";
+  await query(
+    "update app_settings set pilot_mode = $1, invite_only = $2, baseline_sell_through_pct = $3, updated_at = now()",
+    [pilot, inviteOnly, baseline !== null && baseline >= 0 && baseline <= 100 ? baseline : null],
+  );
+  await audit(staff.id, "settings.updated", "settings", null, { pilot, inviteOnly, baseline });
+  revalidatePath("/admin");
+  redirect("/admin/settings?saved=1");
 }
