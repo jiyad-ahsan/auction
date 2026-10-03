@@ -4,7 +4,7 @@ A trust-first online auction platform for **luxury watches**, **collector and hi
 
 ## Watches MVP (the code in this repo)
 
-A working auction platform for authenticated luxury watches: bidder sign-up with KYC and deposits, live proxy bidding with soft close, and an admin back office for intake, authentication reports, lots, payments and consignor payouts. Next.js + PostgreSQL.
+Nilaam, a working auction platform for authenticated luxury watches. It runs in **pilot mode** by default (invite-only via WhatsApp group links, phone + email verification, staff-set bid limits, CNIC at collection) and keeps custody of every watch and every rupee. It has live proxy bidding with late-bid extensions, tags, and an admin back office for intake, custody, authentication reports, lots, invites, payments and consignor payouts. Next.js + PostgreSQL, light and dark themes.
 
 ```bash
 npm install && cp .env.example .env.local   # set APP_ENCRYPTION_KEY and SESSION_SECRET

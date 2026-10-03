@@ -17,30 +17,35 @@ async function q<T extends pg.QueryResultRow = any>(sql: string, params: unknown
   return (await pool.query<T>(sql, params)).rows;
 }
 
-async function user(opts: { limit?: number; kyc?: string; phone?: string } = {}) {
+async function user(opts: { limit?: number; kyc?: string; phone?: string; emailVerified?: boolean } = {}) {
   const seq = ++phoneSeq;
   const phone = opts.phone ?? `+92300${String(seq).padStart(7, "0")}`;
   const [u] = await q(
-    "insert into users (phone, handle, kyc_status, bid_limit) values ($1, $2, $3, $4) returning id",
-    [phone, `bidder${seq}`, opts.kyc ?? "approved", opts.limit ?? 100_000_000],
+    `insert into users (phone, handle, kyc_status, bid_limit, email, email_verified_at)
+     values ($1, $2, $3, $4, $5, case when $6 then now() end) returning id`,
+    [phone, `bidder${seq}`, opts.kyc ?? "approved", opts.limit ?? 100_000_000, `b${seq}@example.com`, opts.emailVerified ?? true],
   );
   return u.id as string;
 }
 
-async function lot(opts: { start?: number; reserve?: number | null; endsInSec?: number; consignorPhone?: string; consignorUser?: string } = {}) {
-  const [c] = await q("insert into consignors (name, phone, user_id) values ('Seller', $1, $2) returning id", [
-    opts.consignorPhone ?? "+923339999999",
-    opts.consignorUser ?? null,
-  ]);
+type LotOpts = {
+  start?: number; reserve?: number | null; endsInSec?: number; consignorPhone?: string; consignorUser?: string;
+  extensionSec?: number; custody?: string; noShill?: boolean; status?: string;
+};
+async function lot(opts: LotOpts = {}) {
+  const [c] = await q(
+    "insert into consignors (name, phone, user_id, no_shill_agreed_at) values ('Seller', $1, $2, case when $3 then now() end) returning id",
+    [opts.consignorPhone ?? "+923339999999", opts.consignorUser ?? null, opts.noShill ?? true],
+  );
   const [w] = await q(
-    "insert into watches (consignor_id, brand, model, reference, status) values ($1, 'Rolex', 'Submariner', '124060', 'listed') returning id",
-    [c.id],
+    "insert into watches (consignor_id, brand, model, reference, status, custody_status) values ($1, 'Rolex', 'Submariner', '124060', 'listed', $2) returning id",
+    [c.id, opts.custody ?? "in_custody"],
   );
   const ends = `${opts.endsInSec ?? 3600} seconds`;
   const [l] = await q(
-    `insert into lots (watch_id, status, starting_price, reserve_price, starts_at, ends_at, scheduled_ends_at)
-     values ($1, 'published', $2, $3, now() - interval '1 minute', now() + $4::interval, now() + $4::interval) returning id`,
-    [w.id, opts.start ?? 1_000_000, opts.reserve ?? null, ends],
+    `insert into lots (watch_id, status, starting_price, reserve_price, starts_at, ends_at, scheduled_ends_at, extension_seconds)
+     values ($1, $5, $2, $3, now() - interval '1 minute', now() + $4::interval, now() + $4::interval, $6) returning id`,
+    [w.id, opts.start ?? 1_000_000, opts.reserve ?? null, ends, opts.status ?? "published", opts.extensionSec ?? 300],
   );
   return l.id as string;
 }
@@ -75,7 +80,8 @@ d("place_bid", () => {
   });
   afterAll(async () => pool?.end());
   beforeEach(async () => {
-    await q("truncate bids, invoices, settlements, lots, media, authentication_reports, watches, consignors, deposits, audit_log, users cascade");
+    await q("truncate bids, invoices, settlements, lots, media, authentication_reports, custody_events, watch_tags, watches, consignors, deposits, audit_log, invites, users cascade");
+    await q("update app_settings set pilot_mode = true, invite_only = true");
   });
 
   it("opens at the starting price and follows proxy rules", async () => {
@@ -134,14 +140,27 @@ d("place_bid", () => {
     expect((await state(l)).current_price).toBe(2_500_000);
   });
 
-  it("extends the end time for bids in the final two minutes", async () => {
+  it("extends a late bid by the lot's window (5 minutes by default)", async () => {
     const l = await lot({ endsInSec: 30 });
     const a = await user();
     const before = (await state(l)).ends_at as Date;
     await bid(l, a, 1_000_000);
     const after = (await state(l)).ends_at as Date;
     expect(after.getTime()).toBeGreaterThan(before.getTime());
-    expect(after.getTime() - Date.now()).toBeGreaterThan(100_000);
+    expect(after.getTime() - Date.now()).toBeGreaterThan(290_000);
+  });
+
+  it("uses a per-lot extension window", async () => {
+    const l = await lot({ endsInSec: 150, extensionSec: 120 });
+    const before = (await state(l)).ends_at as Date;
+    await bid(l, await user(), 1_000_000);
+    // 150s left is outside a 120s window, so no extension.
+    expect(((await state(l)).ends_at as Date).getTime()).toBe(before.getTime());
+    const l2 = await lot({ endsInSec: 60, extensionSec: 120 });
+    await bid(l2, await user(), 1_000_000);
+    const left = ((await state(l2)).ends_at as Date).getTime() - Date.now();
+    expect(left).toBeGreaterThan(110_000);
+    expect(left).toBeLessThan(125_000);
   });
 
   it("does not extend when bidding early", async () => {
@@ -152,7 +171,14 @@ d("place_bid", () => {
     expect(((await state(l)).ends_at as Date).getTime()).toBe(before.getTime());
   });
 
+  it("in pilot mode requires a verified email, not a CNIC", async () => {
+    const l = await lot();
+    expect(await bidError(l, await user({ emailVerified: false }), 1_000_000)).toBe("EMAIL_UNVERIFIED");
+    expect((await bid(l, await user({ kyc: "none" }), 1_000_000)).outcome).toBe("leading");
+  });
+
   it("enforces KYC, suspension, seller separation and closed lots", async () => {
+    await q("update app_settings set pilot_mode = false");
     const l = await lot({ consignorPhone: "+923331112222" });
     expect(await bidError(l, await user({ kyc: "pending" }), 1_000_000)).toBe("KYC_REQUIRED");
     const s = await user();
@@ -226,6 +252,41 @@ d("place_bid", () => {
 
     expect((await state(unsold)).result).toBe("unsold");
     expect(await q("select * from invoices where lot_id = $1", [unsold])).toHaveLength(0);
+  });
+
+  it("only publishes lots for watches in custody with a signed no-shill agreement", async () => {
+    await expect(lot({ custody: "with_consignor" })).rejects.toThrow("WATCH_NOT_IN_CUSTODY");
+    await expect(lot({ noShill: false })).rejects.toThrow("NO_SHILL_AGREEMENT_MISSING");
+    const draft = await lot({ custody: "with_consignor", status: "draft" });
+    await expect(q("update lots set status = 'published' where id = $1", [draft])).rejects.toThrow("WATCH_NOT_IN_CUSTODY");
+  });
+
+  it("combines staff-assigned limits with deposits", async () => {
+    const a = await user({ limit: 0 });
+    await q("update users set assigned_limit = 2000000 where id = $1", [a]);
+    await q("insert into deposits (user_id, amount, method, reference, status) values ($1, 100000, 'raast', 'R1', 'confirmed')", [a]);
+    const [{ l }] = await q("select recalc_bid_limit($1) as l", [a]);
+    expect(l).toBe(4_000_000);
+  });
+
+  it("records a post-auction sale with a bidder, through the same invoice and settlement", async () => {
+    const l = await lot({ start: 1_000_000, reserve: 3_000_000 });
+    const a = await user();
+    const stranger = await user();
+    await bid(l, a, 2_000_000);
+    await q("update lots set ends_at = now() - interval '1 second'");
+    await q("select close_due_lots()");
+    expect((await state(l)).result).toBe("unsold");
+
+    await expect(q("select record_post_auction_sale($1, $2, 2500000, null)", [l, stranger])).rejects.toThrow("BUYER_DID_NOT_BID");
+    await q("select record_post_auction_sale($1, $2, 2500000, null)", [l, a]);
+    const s = await state(l);
+    expect(s.result).toBe("sold");
+    expect(s.sold_via).toBe("post_auction");
+    const [inv] = await q("select * from invoices where lot_id = $1", [l]);
+    expect(inv.buyer_id).toBe(a);
+    expect(inv.total).toBe(2_500_000 + 187_500);
+    await expect(q("select record_post_auction_sale($1, $2, 2600000, null)", [l, a])).rejects.toThrow("LOT_NOT_UNSOLD");
   });
 
   it("keeps bids append-only", async () => {

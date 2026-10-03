@@ -2,6 +2,7 @@ import type { User } from "./auth";
 import { queryOne } from "./db";
 import { lotPhase, publicBids, publicLot } from "./lots";
 import { minNextBid } from "./money";
+import { settings } from "./settings";
 
 export type LotState = {
   id: string;
@@ -18,6 +19,7 @@ export type LotState = {
   leader_handle: string | null;
   buyer_premium_bps: number;
   buyer_premium_min: number;
+  extension_minutes: number;
   bids: { id: number; handle: string | null; amount: number; created_at: string }[];
   server_time: string;
   viewer: null | {
@@ -48,12 +50,15 @@ export async function lotState(lotId: string, user: User | null): Promise<LotSta
                   where l.id = $1 and (c.user_id = $2 or c.phone = $3)) as is_seller`,
       [lotId, user.id, user.phone],
     );
+    const { pilot_mode } = await settings();
     let reason: string | null = null;
     if (user.suspended) reason = "Your account is suspended.";
     else if (row?.is_seller) reason = "You consigned this watch.";
-    else if (user.kyc_status !== "approved") reason = "Verify your identity to bid.";
     else if (!user.handle) reason = "Choose a public bidder handle to bid.";
-    else if (user.bid_limit <= 0) reason = "Place a refundable deposit to set your bid limit.";
+    else if (pilot_mode && !user.email_verified_at) reason = "Verify your email address to bid.";
+    else if (!pilot_mode && user.kyc_status !== "approved") reason = "Verify your identity to bid.";
+    else if (user.bid_limit <= 0)
+      reason = pilot_mode ? "Your bidding limit hasn't been set yet. We'll confirm it with you shortly." : "Place a refundable deposit to set your bid limit.";
     viewer = {
       signed_in: true,
       leading: lot.leader_id === user.id,
@@ -79,6 +84,7 @@ export async function lotState(lotId: string, user: User | null): Promise<LotSta
     leader_handle: lot.leader_handle,
     buyer_premium_bps: lot.buyer_premium_bps,
     buyer_premium_min: lot.buyer_premium_min,
+    extension_minutes: Math.round(lot.extension_seconds / 60),
     bids: bids.slice(0, 25).map((b) => ({ id: b.id, handle: b.handle, amount: b.amount, created_at: new Date(b.created_at).toISOString() })),
     server_time: new Date().toISOString(),
     viewer,

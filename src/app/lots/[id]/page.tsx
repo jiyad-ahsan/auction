@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { BidPanel } from "@/components/BidPanel";
-import { PLACEHOLDER_IMG } from "@/components/LotCard";
+import { WatchFace } from "@/components/WatchFace";
 import { currentUser } from "@/lib/auth";
 import { lotState } from "@/lib/lotState";
 import { authReport, GRADE_LABELS, lotMedia, publicLot } from "@/lib/lots";
@@ -29,13 +29,22 @@ export default async function LotPage({ params }: { params: Promise<{ id: string
 
   return (
     <>
-      <p className="muted small">Lot {lot.lot_number}</p>
+      <p className="card-meta">Lot {lot.lot_number}</p>
       <h1>{lot.brand} {lot.model} <span className="muted">Ref. {lot.reference}</span></h1>
+      {lot.tags.length > 0 && (
+        <p className="tags" style={{ marginTop: -8, marginBottom: 20 }}>
+          {lot.tags.map((t) => <a key={t.slug} className="tag" href={`/?tag=${t.slug}`}>{t.label}</a>)}
+        </p>
+      )}
       <div className="lot-layout">
         <div>
           <div className="gallery">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={media[0]?.url ?? PLACEHOLDER_IMG} alt={media[0]?.alt ?? `${lot.brand} ${lot.model}`} />
+            {media[0] ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={media[0].url} alt={media[0].alt ?? `${lot.brand} ${lot.model}`} />
+            ) : (
+              <div className="hero-img"><WatchFace label={`${lot.brand} ${lot.model}`} /></div>
+            )}
             {media.length > 1 && (
               <div className="thumbs">
                 {media.slice(1).map((m) => (
@@ -63,28 +72,28 @@ export default async function LotPage({ params }: { params: Promise<{ id: string
           {report && (
             <>
               <h2>Authentication &amp; condition report</h2>
-              <p>
-                <span className={`badge ${report.verdict === "authentic" ? "good" : "bad"}`}>{report.verdict === "authentic" ? "Authenticated" : report.verdict}</span>{" "}
-                <span className="badge">Grade {GRADE_LABELS[report.condition_grade] ?? report.condition_grade}</span>
-              </p>
-              <p className="muted small">
-                Inspected by {report.specialist} on {new Date(report.inspected_at).toLocaleDateString("en-GB", { dateStyle: "long" })}. Case opened and movement examined.
-              </p>
-              <table className="specs"><tbody>
-                {report.case_notes && <tr><th>Case</th><td>{report.case_notes}</td></tr>}
-                {report.dial_notes && <tr><th>Dial &amp; hands</th><td>{report.dial_notes}</td></tr>}
-                {report.bracelet_notes && <tr><th>Bracelet / strap</th><td>{report.bracelet_notes}</td></tr>}
-                {report.movement_notes && <tr><th>Movement</th><td>{report.movement_notes}</td></tr>}
-                {report.rate_s_per_day !== null && (
-                  <tr><th>Timegrapher (dial up)</th><td>{report.rate_s_per_day > 0 ? "+" : ""}{report.rate_s_per_day} s/day{report.amplitude_deg ? `, amplitude ${report.amplitude_deg}°` : ""}{report.beat_error_ms !== null ? `, beat error ${report.beat_error_ms} ms` : ""}</td></tr>
-                )}
-                {report.water_tested !== null && <tr><th>Water resistance test</th><td>{report.water_tested ? "Tested, passed" : "Not tested"}</td></tr>}
-                <tr><th>Non-original parts</th><td>{report.aftermarket_parts || "None found"}</td></tr>
-              </tbody></table>
-              {report.checks.length > 0 && (
-                <>
-                  <h3>Checks performed</h3>
-                  <ul className="checks">
+              <div className="report">
+                <div className="report-head">
+                  <span className={`badge ${report.verdict === "authentic" ? "good" : "bad"}`}>{report.verdict === "authentic" ? "Authenticated" : report.verdict}</span>
+                  <span className="grade" title="Condition grade">{report.condition_grade}</span>
+                  <span>{GRADE_LABELS[report.condition_grade] ?? report.condition_grade}</span>
+                  <span className="muted small" style={{ flexBasis: "100%" }}>
+                    Inspected by {report.specialist} on {new Date(report.inspected_at).toLocaleDateString("en-GB", { dateStyle: "long" })}, in Nilaam&apos;s custody. Case opened and movement examined.
+                  </span>
+                </div>
+                <table className="specs report-specs"><tbody>
+                  {report.case_notes && <tr><th>Case</th><td>{report.case_notes}</td></tr>}
+                  {report.dial_notes && <tr><th>Dial &amp; hands</th><td>{report.dial_notes}</td></tr>}
+                  {report.bracelet_notes && <tr><th>Bracelet</th><td>{report.bracelet_notes}</td></tr>}
+                  {report.movement_notes && <tr><th>Movement</th><td>{report.movement_notes}</td></tr>}
+                  {report.rate_s_per_day !== null && (
+                    <tr><th>Timegrapher</th><td className="mono">{report.rate_s_per_day > 0 ? "+" : ""}{report.rate_s_per_day} s/d{report.amplitude_deg ? ` · ${report.amplitude_deg}°` : ""}{report.beat_error_ms !== null ? ` · ${report.beat_error_ms} ms` : ""}</td></tr>
+                  )}
+                  {report.water_tested !== null && <tr><th>Water test</th><td>{report.water_tested ? "Tested, passed" : "Not tested"}</td></tr>}
+                  <tr><th>Non-original parts</th><td>{report.aftermarket_parts || "None found"}</td></tr>
+                </tbody></table>
+                {report.checks.length > 0 && (
+                  <ul className="checks" aria-label="Checks performed">
                     {report.checks.map((c, i) => (
                       <li key={i}>
                         <span className={`badge ${c.result === "pass" ? "good" : c.result === "fail" ? "bad" : ""}`}>{c.result}</span>
@@ -92,8 +101,8 @@ export default async function LotPage({ params }: { params: Promise<{ id: string
                       </li>
                     ))}
                   </ul>
-                </>
-              )}
+                )}
+              </div>
               <div className="notice small">
                 <strong>Authenticity guarantee.</strong> If this watch is shown to be not authentic or materially
                 misdescribed within 12 months of handover, we refund the full amount you paid.

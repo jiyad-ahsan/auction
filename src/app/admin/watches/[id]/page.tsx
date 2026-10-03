@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { addMediaAction, createLotAction, removeMediaAction, saveReportAction, updateWatchDescriptionAction } from "@/app/actions/admin";
+import { addMediaAction, createLotAction, custodyAction, noShillAgreementAction, removeMediaAction, saveReportAction, setWatchTagsAction, updateWatchDescriptionAction } from "@/app/actions/admin";
 import { query, queryOne } from "@/lib/db";
 import { authReport, lotMedia } from "@/lib/lots";
 import { formatPKR } from "@/lib/money";
@@ -9,6 +9,17 @@ const ERRORS: Record<string, string> = {
   media: "Image URLs must start with https://",
   not_authenticated: "Save an authentication report with verdict 'authentic' before creating a lot.",
   lot: "Check the prices and dates: reserve must be at least the starting price and the end after the start.",
+  not_in_custody: "The watch must be received into our custody before its lot can be published. It was not created.",
+  no_shill: "The consignor must sign the no-shill agreement before a lot can be published. It was not created.",
+  location: "Enter where the watch is being kept.",
+  return: "A watch can only be returned when it is in our custody, unsold and has no open lot.",
+};
+
+const CUSTODY_LABELS: Record<string, string> = {
+  with_consignor: "With consignor, not yet received",
+  in_custody: "In Nilaam custody",
+  released_to_buyer: "Collected by buyer",
+  returned_to_consignor: "Returned to consignor",
 };
 
 const DEFAULT_CHECKS = [
@@ -27,15 +38,25 @@ export default async function WatchDetail({ params, searchParams }: { params: Pr
   const { error } = await searchParams;
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const watch = await queryOne<Record<string, any>>(
-    "select w.*, c.name as consignor_name, c.phone as consignor_phone from watches w join consignors c on c.id = w.consignor_id where w.id = $1",
+    "select w.*, c.name as consignor_name, c.phone as consignor_phone, c.no_shill_agreed_at from watches w join consignors c on c.id = w.consignor_id where w.id = $1",
     [id],
   );
   if (!watch) notFound();
-  const [media, report, lots] = await Promise.all([
+  const [media, report, lots, tags, events] = await Promise.all([
     lotMedia(id),
     authReport(id),
     query<{ id: string; lot_number: number; status: string; result: string | null; current_price: number | null }>(
       "select id, lot_number, status, result, current_price from lots where watch_id = $1 order by created_at desc",
+      [id],
+    ),
+    query<{ id: string; label: string; active: boolean; on: boolean }>(
+      `select t.id, t.label, t.active, exists (select 1 from watch_tags wt where wt.watch_id = $1 and wt.tag_id = t.id) as on
+         from tags t order by t.label`,
+      [id],
+    ),
+    query<{ event: string; location: string | null; note: string | null; created_at: Date; actor: string | null }>(
+      `select e.event, e.location, e.note, e.created_at, coalesce(u.full_name, u.handle, u.phone) as actor
+         from custody_events e left join users u on u.id = e.actor_id where e.watch_id = $1 order by e.created_at desc`,
       [id],
     ),
   ]);
@@ -55,6 +76,75 @@ export default async function WatchDetail({ params, searchParams }: { params: Pr
       {lots.length > 0 && (
         <p>Lots: {lots.map((l) => <span key={l.id}><Link href={`/lots/${l.id}`}>Lot {l.lot_number}</Link> ({l.status}{l.result ? `, ${l.result}` : ""}{l.current_price ? `, ${formatPKR(l.current_price)}` : ""}) </span>)}</p>
       )}
+
+      <h2>Custody</h2>
+      <p>
+        <span className={`badge ${watch.custody_status === "in_custody" ? "good" : watch.custody_status === "with_consignor" ? "warn" : ""}`}>{CUSTODY_LABELS[watch.custody_status]}</span>
+        {watch.custody_location && <> · Location: <strong>{watch.custody_location}</strong></>}
+      </p>
+      {watch.custody_status === "with_consignor" && (
+        <form action={custodyAction} className="stack">
+          <input type="hidden" name="watch_id" value={id} />
+          <input type="hidden" name="op" value="received" />
+          <div className="row">
+            <label>Storage location<input name="location" placeholder="e.g. Lahore vault, safe 2" required /></label>
+            <label>Note (condition on arrival, who delivered it)<input name="note" /></label>
+          </div>
+          <button>Record as received into custody</button>
+        </form>
+      )}
+      {watch.custody_status === "in_custody" && (
+        <div className="row" style={{ alignItems: "end" }}>
+          <form action={custodyAction} className="inline">
+            <input type="hidden" name="watch_id" value={id} />
+            <input type="hidden" name="op" value="moved" />
+            <input name="location" placeholder="New location" required aria-label="New location" />
+            <button className="secondary">Record move</button>
+          </form>
+          {!hasOpenLot && watch.status !== "sold" && (
+            <form action={custodyAction} className="inline">
+              <input type="hidden" name="watch_id" value={id} />
+              <input type="hidden" name="op" value="returned" />
+              <input name="note" placeholder="Reason (optional)" aria-label="Reason for return" />
+              <button className="danger">Return to consignor</button>
+            </form>
+          )}
+        </div>
+      )}
+      {events.length > 0 && (
+        <div className="table-wrap" style={{ marginTop: 12 }}><table className="data">
+          <thead><tr><th>When</th><th>Event</th><th>Location</th><th>Note</th><th>By</th></tr></thead>
+          <tbody>{events.map((e, i) => (
+            <tr key={i}><td className="small">{new Date(e.created_at).toLocaleString("en-GB", { timeZone: "Asia/Karachi" })}</td><td>{e.event.replace(/_/g, " ")}</td><td>{e.location ?? ""}</td><td className="small">{e.note ?? ""}</td><td className="small">{e.actor ?? ""}</td></tr>
+          ))}</tbody>
+        </table></div>
+      )}
+
+      <h2>No-shill agreement</h2>
+      {watch.no_shill_agreed_at ? (
+        <p><span className="badge good">Signed</span> {watch.consignor_name} agreed on {new Date(watch.no_shill_agreed_at).toLocaleDateString("en-GB", { dateStyle: "long" })} that nobody connected to them will bid on their watches.</p>
+      ) : (
+        <form action={noShillAgreementAction} className="stack">
+          <input type="hidden" name="watch_id" value={id} />
+          <input type="hidden" name="consignor_id" value={watch.consignor_id} />
+          <p className="muted">Required before any of this consignor&apos;s lots can be published. Record it once the signed agreement is on file.</p>
+          <button className="secondary">Record signed agreement</button>
+        </form>
+      )}
+
+      <h2>Tags</h2>
+      <form action={setWatchTagsAction} className="stack" style={{ maxWidth: 720 }}>
+        <input type="hidden" name="watch_id" value={id} />
+        <div className="tags">
+          {tags.filter((t) => t.active || t.on).map((t) => (
+            <label key={t.id} className="checkrow tag" style={{ padding: "4px 8px" }}>
+              <input type="checkbox" name="tag_id" value={t.id} defaultChecked={t.on} /> {t.label}
+            </label>
+          ))}
+        </div>
+        <span className="muted small">Manage the tag list under <Link href="/admin/tags">Tags</Link>.</span>
+        <button className="secondary">Save tags</button>
+      </form>
 
       <h2>Catalogue text</h2>
       <form action={updateWatchDescriptionAction} className="stack" style={{ maxWidth: 720 }}>
@@ -140,7 +230,15 @@ export default async function WatchDetail({ params, searchParams }: { params: Pr
             <label>Opens (PKT)<input type="datetime-local" name="starts_at" required /></label>
             <label>Ends (PKT)<input type="datetime-local" name="ends_at" required /></label>
           </div>
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" name="publish" style={{ width: "auto" }} /> Publish now (otherwise saved as draft)</label>
+          <label>
+            Late-bid extension (minutes)
+            <input name="extension_minutes" inputMode="numeric" defaultValue={5} />
+            <span className="muted small">A bid in the final N minutes extends the lot by N minutes.</span>
+          </label>
+          {(watch.custody_status !== "in_custody" || !watch.no_shill_agreed_at) && (
+            <div className="notice small">You can save this as a draft now. Publishing needs the watch in custody and the signed no-shill agreement.</div>
+          )}
+          <label className="checkrow"><input type="checkbox" name="publish" /> Publish now (otherwise saved as draft)</label>
           <button>Create lot</button>
         </form>
       )}

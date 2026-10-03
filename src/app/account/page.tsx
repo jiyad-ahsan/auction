@@ -1,10 +1,11 @@
 import Link from "next/link";
 import { signOutAction } from "@/app/actions/auth";
-import { submitDepositAction, submitKycAction, updateProfileAction } from "@/app/actions/account";
+import { sendEmailCodeAction, submitDepositAction, submitKycAction, updateProfileAction, verifyEmailCodeAction } from "@/app/actions/account";
 import { requireUser } from "@/lib/auth";
 import { query, queryOne } from "@/lib/db";
 import { formatLakhCrore, formatPKR } from "@/lib/money";
 import { maskPhone } from "@/lib/phone";
+import { settings } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
 
@@ -13,18 +14,24 @@ const ERRORS: Record<string, string> = {
   handle_taken: "That handle is taken.",
   kyc: "Enter your full name as on your CNIC and a 13-digit CNIC number.",
   deposit: "Enter an amount of at least PKR 50,000, the payment method and the transaction reference.",
+  email: "Enter a valid email address.",
+  email_rate: "Too many codes requested. Please try again in an hour.",
+  email_code: "That code is incorrect or has expired. Request a new one.",
 };
 const SAVED: Record<string, string> = {
   profile: "Profile saved.",
   kyc: "Thanks. Our team will verify your identity, usually within one business day.",
   deposit: "Deposit recorded. Your bid limit updates once we confirm the funds in our account.",
+  email_sent: "We've emailed you a 6-digit code. Enter it below.",
+  email_verified: "Email verified.",
 };
 
 const fmtDate = (d: Date) => new Date(d).toLocaleString("en-GB", { timeZone: "Asia/Karachi", dateStyle: "medium", timeStyle: "short" });
 
 export default async function Account({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
   const user = await requireUser();
-  const { error, saved } = await searchParams;
+  const { error, saved, email_pending } = await searchParams;
+  const { pilot_mode } = await settings();
 
   const [deposits, myLots, invoices, exposure] = await Promise.all([
     query<{ id: string; amount: number; method: string; reference: string; status: string; created_at: Date }>(
@@ -64,7 +71,8 @@ export default async function Account({ searchParams }: { searchParams: Promise<
       {saved && <div className="notice good">{SAVED[saved]}</div>}
 
       <div className="kpis">
-        <div className="kpi"><span className="muted small">Identity</span><strong>{{ none: "Not verified", pending: "In review", approved: "Verified", rejected: "Action needed" }[user.kyc_status]}</strong></div>
+        {pilot_mode && <div className="kpi"><span className="muted small">Email</span><strong>{user.email_verified_at ? "Verified" : "Not verified"}</strong></div>}
+        <div className="kpi"><span className="muted small">{pilot_mode ? "CNIC (for collection)" : "Identity"}</span><strong>{{ none: "Not verified", pending: "In review", approved: "Verified", rejected: "Action needed" }[user.kyc_status]}</strong></div>
         <div className="kpi"><span className="muted small">Bid limit</span><strong>{formatPKR(user.bid_limit)}</strong></div>
         <div className="kpi"><span className="muted small">Available to bid</span><strong>{formatPKR(Math.max(0, user.bid_limit - (exposure?.e ?? 0)))}</strong></div>
       </div>
@@ -120,14 +128,32 @@ export default async function Account({ searchParams }: { searchParams: Promise<
           Bidder handle (shown publicly instead of your name)
           <input name="handle" defaultValue={user.handle ?? ""} placeholder="e.g. tourbillon_lhr" required />
         </label>
-        <label>
-          Email (optional, for receipts)
-          <input name="email" type="email" defaultValue={user.email ?? ""} />
-        </label>
         <button type="submit">Save profile</button>
       </form>
 
-      <h2>2. Verify your identity</h2>
+      <h2>2. Verify your email</h2>
+      {user.email_verified_at ? (
+        <p>Verified: {user.email}. Receipts and invoices go here.</p>
+      ) : (
+        <>
+          {pilot_mode && <p className="muted">You need a verified email address before you can bid.</p>}
+          <form action={sendEmailCodeAction} className="stack">
+            <label>Email address<input name="email" type="email" defaultValue={email_pending ?? user.email ?? ""} required autoComplete="email" /></label>
+            <button type="submit" className={email_pending ? "secondary" : undefined}>{email_pending ? "Send a new code" : "Send verification code"}</button>
+          </form>
+          {email_pending && (
+            <form action={verifyEmailCodeAction} className="stack" style={{ marginTop: 12 }}>
+              <label>6-digit code sent to {email_pending}<input name="code" inputMode="numeric" pattern="\d{6}" maxLength={6} required autoComplete="one-time-code" /></label>
+              <button type="submit">Verify email</button>
+            </form>
+          )}
+        </>
+      )}
+
+      <h2>3. {pilot_mode ? "CNIC, required before collection" : "Verify your identity"}</h2>
+      {pilot_mode && user.kyc_status !== "approved" && (
+        <p className="muted">You can bid without it, but we check your CNIC before you collect a watch. Submitting it now makes collection quicker.</p>
+      )}
       {user.kyc_status === "approved" ? (
         <p>Verified. CNIC ending {user.cnic_last4}.</p>
       ) : user.kyc_status === "pending" ? (
@@ -144,7 +170,16 @@ export default async function Account({ searchParams }: { searchParams: Promise<
         </>
       )}
 
-      <h2>3. Deposit to set your bid limit</h2>
+      {pilot_mode ? (
+        <>
+          <h2>4. Your bid limit</h2>
+          <p>
+            Your bid limit is {formatPKR(user.bid_limit)}. It covers the total of your highest bids on every lot you&apos;re leading, plus anything
+            you&apos;ve won and not yet paid for. During the invite-only period our team sets it for each member. Contact us if you need it raised.
+          </p>
+        </>
+      ) : (<>
+      <h2>4. Deposit to set your bid limit</h2>
       <p>
         Your bid limit is 20× your confirmed deposit (the deposit is 5% of the limit, minimum PKR 50,000). For example, a PKR 150,000
         deposit lets you bid up to PKR 3,000,000 ({formatLakhCrore(3_000_000)}) across all lots you lead. Deposits are refundable
@@ -179,6 +214,7 @@ export default async function Account({ searchParams }: { searchParams: Promise<
           </tbody>
         </table></div>
       )}
+      </>)}
     </>
   );
 }

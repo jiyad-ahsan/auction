@@ -4,6 +4,7 @@ import { query } from "@/lib/db";
 import { formatPKR } from "@/lib/money";
 
 const ERRORS: Record<string, string> = {
+  cnic: "The buyer's CNIC must be verified before they collect. Review it under Bidders & KYC first.",
   reference: "Enter the bank transaction reference.",
   settlement: "A consignor can only be paid after the buyer has paid and collected the watch.",
 };
@@ -12,12 +13,12 @@ export default async function Invoices({ searchParams }: { searchParams: Promise
   const { error } = await searchParams;
   const rows = await query<{
     invoice_id: string; lot_id: string; lot_number: number; title: string; buyer: string; buyer_phone: string;
-    hammer: number; buyer_premium: number; total: number; due_at: Date; status: string; paid_at: Date | null; payment_reference: string | null; handed_over_at: Date | null;
+    hammer: number; buyer_premium: number; total: number; due_at: Date; status: string; paid_at: Date | null; payment_reference: string | null; handed_over_at: Date | null; buyer_kyc: string; sold_via: string | null;
     settlement_id: string; consignor: string; seller_fee: number; net_payout: number; settlement_status: string; settlement_reference: string | null;
   }>(
     `select i.id as invoice_id, l.id as lot_id, l.lot_number, w.brand || ' ' || w.model as title,
             coalesce(u.full_name, u.handle) as buyer, u.phone as buyer_phone,
-            i.hammer, i.buyer_premium, i.total, i.due_at, i.status, i.paid_at, i.payment_reference, i.handed_over_at,
+            i.hammer, i.buyer_premium, i.total, i.due_at, i.status, i.paid_at, i.payment_reference, i.handed_over_at, u.kyc_status as buyer_kyc, l.sold_via,
             s.id as settlement_id, c.name as consignor, s.seller_fee, s.net_payout, s.status as settlement_status, s.reference as settlement_reference
        from invoices i
        join lots l on l.id = i.lot_id join watches w on w.id = l.watch_id
@@ -39,7 +40,7 @@ export default async function Invoices({ searchParams }: { searchParams: Promise
         <tbody>
           {rows.map((r) => (
             <tr key={r.invoice_id}>
-              <td><Link href={`/lots/${r.lot_id}`}>Lot {r.lot_number}</Link><div className="small">{r.title}</div></td>
+              <td><Link href={`/lots/${r.lot_id}`}>Lot {r.lot_number}</Link><div className="small">{r.title}</div>{r.sold_via === "post_auction" && <span className="badge">After auction</span>}</td>
               <td>{r.buyer}<div className="muted small">{r.buyer_phone}</div></td>
               <td className="small">Hammer {formatPKR(r.hammer)}<br />Premium {formatPKR(r.buyer_premium)}<br /><strong>Due {formatPKR(r.total)}</strong></td>
               <td>
@@ -60,6 +61,7 @@ export default async function Invoices({ searchParams }: { searchParams: Promise
                 {r.handed_over_at ? <span className="small">{fmt(r.handed_over_at)}</span> : r.status === "paid" ? (
                   <form action={invoiceAction} className="inline">
                     <input type="hidden" name="invoice_id" value={r.invoice_id} />
+                    {r.buyer_kyc !== "approved" && <span className="badge warn" title="Verify the CNIC before collection">CNIC needed</span>}
                     <button name="op" value="handed_over" className="secondary">Mark collected</button>
                   </form>
                 ) : ""}

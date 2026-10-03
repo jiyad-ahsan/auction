@@ -2,13 +2,38 @@
 
 This narrows [`build-plan.md`](./build-plan.md) to **luxury watches only**: the smallest thing we can use to run real auctions with real money. It covers what's built, how to run it, how the team operates it, and what's left before the first public sale.
 
+## The pilot (current setup)
+
+The first live test follows the co-founders' MVP brief: **one seller (an established vintage watch dealer), vintage watches, invite-only through his WhatsApp groups.** It keeps the platform as a proper middle man from day one:
+
+- **We hold the watch.** A lot can't be published until the watch has been recorded as received into Nilaam's custody, with its storage location. The database enforces this. Every move, collection and return is logged as a custody event.
+- **We hold the money.** Buyers pay Nilaam's client account, never the seller. The seller is paid only after the buyer has paid **and** collected.
+- **Deals after a missed reserve still run through Nilaam.** Staff record the sale on the Lots page (the buyer must have bid on the lot), which creates the same invoice, payment and handover flow.
+- **No shill bidding, in writing.** A lot can't be published until the consignor's signed no-shill agreement is recorded. The seller's own account and phone are blocked from bidding.
+
+**Pilot mode** (Admin → Settings, on by default) lowers friction for invited, known buyers:
+
+| | Pilot mode | Full mode (later) |
+|---|---|---|
+| Sign-up | Invite link per WhatsApp group (`/join/CODE`), or invite code | Open, or invite-only if kept on |
+| To bid | Verified phone (sign-in) + verified email | Verified CNIC |
+| Bid limit | Set by staff; each invite gives new members a starting limit | 20× confirmed refundable deposit (staff limits still add on top) |
+| CNIC | Checked before collection (handover is blocked without it) | Checked before bidding |
+| Late-bid extension | Per lot, default 5 minutes | Same |
+
+**Measuring the pilot:** the dashboard shows sell-through next to the seller's normal sell rate (set in Settings), bidders and bids per closed lot, and separates "unsold but had bids" (price too high) from "no bids" (no interest). The Invites page shows members, bidders, bids, winners and GMV per WhatsApp group.
+
+**Tags** replace fixed vintage fields: staff manage the tag list (Admin → Tags; seeded with *Watch only, Box & papers, Patina, Unpolished case, Service history*), tick tags on each watch, and buyers can filter the catalogue by tag. Turning a tag off hides it everywhere without deleting it.
+
+**Switching on the stricter process** (from `strategy.md`): turn pilot mode off when the first outside seller joins, after the first non-payment, or before opening to bidders outside the invite list.
+
 ## What the MVP does
 
 | Area | Built |
 |---|---|
 | **Catalogue** | Home (live and upcoming lots), lot page (photos, specs, authentication and condition report, guarantee), results archive, how-it-works/fees/increments page |
 | **Bidders** | Phone OTP sign-in, public handle (names never shown), CNIC submission (encrypted at rest), deposit submission (Raast / IBFT / pay order reference), bid limit and available limit, my bids (leading/outbid/won), purchases with payment instructions |
-| **Bidding** | Proxy (max) bidding, PKR increment table, hidden reserve with a "reserve met" flag, 2-minute soft close, bid limit enforced across **all** lots a bidder leads plus unpaid invoices, consignors blocked from their own lots, idempotent retries, append-only bid log, live updates by polling (every 1.5s in the last 5 minutes) |
+| **Bidding** | Proxy (max) bidding, PKR increment table, hidden reserve with a "reserve met" flag, late-bid extension set per lot (default 5 minutes), bid limit enforced across **all** lots a bidder leads plus unpaid invoices, consignors blocked from their own lots, idempotent retries, append-only bid log, live updates by polling (every 1.5s in the last 5 minutes) |
 | **Sellers** | "Sell a watch" enquiry form feeding the admin queue |
 | **Admin** | Operations dashboard (queues, GMV, sell-through); consignment enquiries; watch intake with consignor; photos; **authentication report builder** (grade S–D, timegrapher, parts, checklist); lot creation (drafts or publish; PKT times); lot list with private reserve and leader max; outage extension; KYC review (CNIC reveal is audit-logged) and suspend; deposits (confirm / reject / refund / forfeit, with bid limit recalculated); invoices (mark paid, collected, default, which suspends the buyer and voids the payout); consignor payouts (blocked until the buyer has paid **and** collected) |
 | **Closing** | `close_due_lots()` finalises lots, creates the invoice (hammer + 7.5% premium, min PKR 15k) and settlement (5% seller fee), and notifies winners once |
@@ -54,13 +79,15 @@ tests/                money + bid engine integration tests
 1. **Intake:** a consignment enquiry arrives → a specialist calls within one business day → the watch is received at the viewing room → Admin → Watches → *Intake a watch*.
 2. **Authenticate:** open the case, check movement/serial/reference, timegrapher reading, stolen-register check → fill in the report → verdict *authentic* moves the watch to `approved`. Anything inconclusive is returned to the consignor.
 3. **Catalogue:** studio photos only (strip EXIF/GPS, never at the consignor's home) → add image URLs → write the description.
-4. **Schedule:** create the lot with starting price and reserve (agreed in writing with the consignor), 7 days, ending in the evening PKT, staggered a few minutes apart.
-5. **Bidders:**
+4. **Custody and agreement:** record the watch as received (with its storage location) and record the consignor's signed no-shill agreement. Add tags.
+5. **Schedule:** create the lot with starting price and reserve (agreed in writing with the consignor), duration and late-bid extension (default 5 minutes), ending in the evening PKT, staggered a few minutes apart.
+6. **Bidders:**
+   - Pilot: create an invite per WhatsApp group with a sensible starting limit; adjust individual limits under Bidders & KYC.
    - KYC: check each CNIC against NADRA (via the bank partner or e-Sahulat), and add a WhatsApp video check for limits above PKR 5M.
    - Deposits: confirm only against the client-account bank statement.
-6. **Close:** the winner is notified automatically → confirm the payment on the statement → mark paid → book the handover (buyer inspects, signs) → mark collected → pay the consignor and record the transfer reference.
-7. **Defaults:** after 3 days unpaid, mark defaulted (suspends the buyer) → forfeit their deposit on the Deposits page → offer the watch to the underbidder or relist.
-8. **Refunds:** on request, mark the deposit refunded after sending it back. The system blocks refunds that would leave open bids or unpaid invoices uncovered.
+7. **Close:** the winner is notified automatically → confirm the payment on the statement → mark paid → verify the buyer's CNIC → book the handover (buyer inspects, signs) → mark collected (releases custody) → pay the consignor and record the transfer reference. If the reserve was missed and a bidder agrees a price afterwards, record it on the Lots page.
+8. **Defaults:** after 3 days unpaid, mark defaulted (suspends the buyer) → forfeit their deposit on the Deposits page → offer the watch to the underbidder or relist.
+9. **Refunds:** on request, mark the deposit refunded after sending it back. The system blocks refunds that would leave open bids or unpaid invoices uncovered.
 
 ## Before the first public sale
 

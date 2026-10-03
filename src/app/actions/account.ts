@@ -6,15 +6,15 @@ import { audit } from "@/lib/audit";
 import { requireUser } from "@/lib/auth";
 import { encrypt } from "@/lib/crypto";
 import { query, queryOne } from "@/lib/db";
+import { sendEmailCode, validEmail, verifyEmailCode } from "@/lib/email";
 
 export async function updateProfileAction(formData: FormData) {
   const user = await requireUser();
   const handle = String(formData.get("handle") ?? "").trim().toLowerCase();
-  const email = String(formData.get("email") ?? "").trim() || null;
   if (!/^[a-z0-9_]{3,20}$/.test(handle)) redirect("/account?error=handle");
   const taken = await queryOne("select 1 from users where handle = $1 and id <> $2", [handle, user.id]);
   if (taken) redirect("/account?error=handle_taken");
-  await query("update users set handle = $1, email = $2 where id = $3", [handle, email, user.id]);
+  await query("update users set handle = $1 where id = $2", [handle, user.id]);
   revalidatePath("/account");
   redirect("/account?saved=profile");
 }
@@ -49,4 +49,21 @@ export async function submitDepositAction(formData: FormData) {
   );
   await audit(user.id, "deposit.submitted", "deposit", d.id, { amount, method });
   redirect("/account?saved=deposit");
+}
+
+export async function sendEmailCodeAction(formData: FormData) {
+  const user = await requireUser();
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  if (!validEmail(email)) redirect("/account?error=email");
+  const res = await sendEmailCode(user.id, email);
+  if (res === "rate") redirect(`/account?error=email_rate&email_pending=${encodeURIComponent(email)}`);
+  redirect(`/account?saved=email_sent&email_pending=${encodeURIComponent(email)}`);
+}
+
+export async function verifyEmailCodeAction(formData: FormData) {
+  const user = await requireUser();
+  const ok = await verifyEmailCode(user.id, String(formData.get("code") ?? ""));
+  if (!ok) redirect("/account?error=email_code");
+  await audit(user.id, "email.verified", "user", user.id);
+  redirect("/account?saved=email_verified");
 }
