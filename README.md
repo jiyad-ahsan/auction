@@ -19,6 +19,7 @@ See [`docs/watches-mvp.md`](docs/watches-mvp.md) for scope, setup, the operating
 - [`docs/watches-mvp.md`](docs/watches-mvp.md): the watches MVP (what's built, how to run and operate it, what's left before the first sale).
 
 - [`docs/strategy.md`](docs/strategy.md): market landscape, why online auctions haven't caught on, category assessment, international auction models and which to use, feasibility (payments, legal/tax, security, economics), go-to-market, risks, and the decisions the founders need to make.
+- [`docs/architecture-review.md`](docs/architecture-review.md): review of Anas's MVP architecture document against what's built, with questions for the founders.
 - [`docs/product-page-review.md`](docs/product-page-review.md): review of Anas's lot page prototype: what to adopt, what to change, decisions needed, and a build plan.
 - [`docs/build-plan.md`](docs/build-plan.md): phased roadmap, MVP scope, auction rules, architecture, bid engine design, data model, sprint plan, team and launch checklist.
 
